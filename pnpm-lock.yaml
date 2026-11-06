@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@tweakpane/core':
+        specifier: ^2.0.5
+        version: 2.0.5
       next:
         specifier: 16.4.5
         version: 16.4.5(@babel/core@7.29.13)(@types/node@20.19.43)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
@@ -17,6 +20,9 @@ importers:
       react-dom:
         specifier: 19.3.0
         version: 19.3.0(react@19.3.0)
+      tweakpane:
+        specifier: ^4.0.5
+        version: 4.0.5
     devDependencies:
       '@tailwindcss/turbopack':
         specifier: ^4
@@ -531,6 +537,9 @@ packages:
 
   '@tailwindcss/turbopack@4.3.4':
     resolution: {integrity: sha512-zaGyyqTe+7Leowbp5HZ6SXBQ/XFbGK4sV/I5ZPwiO/bWD1j/ukJGzyKOZLj9//uD11790obelpdQHjXJRTpORA==}
+
+  '@tweakpane/core@2.0.5':
+    resolution: {integrity: sha512-punBgD5rKCF5vcNo6BsSOXiDR/NSs9VM7SG65QSLJIxfRaGgj54ree9zQW6bO3pNFf3AogiGgaNODUVQRk9YqQ==}
 
   '@types/estree@1.0.10':
     resolution: {integrity: sha512-lTyOMnOcmRBzdCv6/4zUZCrEhV0xrqQiUZBZtVcbmLHBXKLnN8q89v/wKRF/Q0HbwVsqbIG3o5HDoFl9sduM+g==}
@@ -1887,6 +1896,9 @@ packages:
   tslib@2.9.1:
     resolution: {integrity: sha512-a4Ux9VKuIMHsOS7ENbEq6hK2ZGYIT27Rtl0E4eD9KqwxhKiQeMZE/9xb3IdYwWaSOyIBQLExhQgXDTYoiCxnWA==}
 
+  tweakpane@4.0.5:
+    resolution: {integrity: sha512-rxEXdSI+ArlG1RyO6FghC4ZUX8JkEfz8F3v1JuteXSV0pEtHJzyo07fcDG+NsJfN5L39kSbCYbB9cBGHyuI/tQ==}
+
   type-check@0.4.0:
     resolution: {integrity: sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew==}
     engines: {node: '>= 0.8.0'}
@@ -2401,6 +2413,8 @@ snapshots:
       '@tailwindcss/node': 4.3.4
       '@tailwindcss/oxide': 4.3.4
       tailwindcss: 4.3.4
+
+  '@tweakpane/core@2.0.5': {}
 
   '@types/estree@1.0.10': {}
 
@@ -3958,6 +3972,8 @@ snapshots:
       strip-bom: 3.0.0
 
   tslib@2.9.1: {}
+
+  tweakpane@4.0.5: {}
 
   type-check@0.4.0:
     dependencies:

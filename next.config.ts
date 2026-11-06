@@ -10,6 +10,9 @@ const nextConfig: NextConfig = {
         loaders: ["@tailwindcss/turbopack"],
         as: "*.css",
       },
+      "*.frag": {
+        type: "text",
+      },
     },
   },
 };
