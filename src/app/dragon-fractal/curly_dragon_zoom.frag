@@ -2,7 +2,9 @@
 // The camera zooms forever into the dragon's tip. Because the dragon is made of
 // smaller copies of itself, new curls keep growing out of the center endlessly.
 // Darker colors are drawn as a rotated halftone: one crisp dot per grid cell,
-// sized by how bright the dragon is at that cell's center.
+// sized by how bright the dragon is at that cell's center. Lighter colors are
+// drawn solid. Hovering paints a heat field that cools and spreads; as it
+// lifts the ink, the halftone gives way to the solid curve.
 
 // ---- Tweakable settings ----
 uniform vec3  u_color0;  // color #030d19
@@ -31,6 +33,16 @@ uniform float u_angle;   // 0.0, 6.28, 2.25
 uniform float u_dotCut;  // 0.05, 1.0, 1.0
 uniform float u_dotMin;  // 0.0, 1.0, 0.29
 uniform float u_dotTint; // 0.0, 1.0, 0.0
+
+// ---- Heat ----
+// Screen-space field. Radius, dissipate, and spread drive it each frame.
+// Lift mixes toward the heat color before the halftone test, so lighter ink
+// is drawn solid instead of as dots.
+uniform vec3  u_heatColor;     // color #adc9ed
+uniform float u_heatRadius;    // 0.02, 0.80, 0.10
+uniform float u_heatDissipate; // 0.0, 3.0, 0.20
+uniform float u_heatSpread;    // 0.0, 8.0, 8.0
+uniform float u_heatLift;      // 0.0, 1.0, 1.0
 
 // ---- Quality ----
 const int MAX_DEPTH = 24;   // detail cap
@@ -84,6 +96,17 @@ vec3 gradientMap(float x) {
 }
 
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+float heatAt(vec2 screenPx) {
+    return texture(u_heatMap, screenPx / u_resolution).r;
+}
+
+// Lift runs before the solid-versus-dot test. A color that becomes light
+// takes the solid path; the dots fade out over the same threshold.
+vec3 heatColor(vec3 col, float heat) {
+    float t = clamp(heat, 0.0, 1.0) * u_heatLift;
+    return mix(col, u_heatColor, t);
+}
 
 // Returns the position along the curve (0..1) if p is on the dragon, or -1 if not.
 float dragon(vec2 p, vec2 a, vec2 c, float R, int depthN) {
@@ -180,6 +203,7 @@ void main() {
     gCamScale = length(gCam);
 
     vec2 px = v_uv * u_resolution;
+    vec2 fragPx = gl_FragCoord.xy;
     float pixUV = 2.0 / u_resolution.y; // one screen pixel in uv units
 
     // Palette brightness reference: the brightest of the four colors
@@ -196,7 +220,7 @@ void main() {
             vec2 o = (vec2(float(i), float(j)) + 0.5) / float(AA) - 0.5;
             vec3 sc;
             if (sampleDragon(pxToUV(px + o), pixUV, sc)) {
-                colSum += sc;
+                colSum += heatColor(sc, heatAt(fragPx + o));
                 hits += 1.0;
             }
         }
@@ -218,16 +242,20 @@ void main() {
 
     vec4 dots = vec4(0.0);
     if (hitC) {
-        float lr = luma(colC) / cutL;
-        float tone = mix(u_dotMin, 1.0, clamp(lr, 0.0, 1.0));
+        // Dot size stays with the unheated ink. Presence follows the lifted
+        // color, so a pixel that has become light loses its dot.
+        float tone = mix(u_dotMin, 1.0, clamp(luma(colC) / cutL, 0.0, 1.0));
         float radius = tone * 0.5 * u_dot;
         float aa = 1.5 / u_cell;
         float mask = 1.0 - smoothstep(radius - aa, radius + aa, length(f));
+        vec3 shown = heatColor(colC, heatAt(fragPx));
+        float lr = luma(shown) / cutL;
         float a = mask * (1.0 - smoothstep(0.8, 1.0, lr)) * u_dither;
-        vec3 dc = mix(colC, brightest, u_dotTint * (1.0 - tone));
+        vec3 dc = mix(shown, brightest, u_dotTint * (1.0 - tone));
         dots = vec4(dc * a, a);
     }
 
-    // Premultiplied alpha: solid over dots, everything else fully transparent
-    fragColor = (solid + dots * (1.0 - solid.a)) * u_opacity;
+    // Premultiplied alpha: solid over dots, everything else fully transparent.
+    vec4 ink = solid + dots * (1.0 - solid.a);
+    fragColor = ink * u_opacity;
 }
