@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import Stats from "stats.js";
 import { Pane } from "tweakpane";
 import fragmentSource from "./curly_dragon_zoom.frag";
 
@@ -550,6 +551,9 @@ export function DragonFractal() {
     const observer = new ResizeObserver(resize);
     observer.observe(canvas);
 
+    const stats = new Stats();
+    document.body.appendChild(stats.dom);
+
     const started = performance.now();
     let frame = 0;
     let lastNow = started;
@@ -598,11 +602,13 @@ export function DragonFractal() {
     };
 
     const draw = (now: number) => {
+      stats.begin();
       const dt = Math.min(0.05, (now - lastNow) / 1000);
       lastNow = now;
       const width = canvas.width;
       const height = canvas.height;
       if (!ensureHeat(width, height)) {
+        stats.end();
         setError("WebGL2 could not store the heat field.");
         return;
       }
@@ -642,12 +648,14 @@ export function DragonFractal() {
       gl.drawArrays(gl.TRIANGLES, 0, 3);
 
       heatIndex = dst;
+      stats.end();
       frame = requestAnimationFrame(draw);
     };
     frame = requestAnimationFrame(draw);
 
     return () => {
       cancelAnimationFrame(frame);
+      stats.dom.remove();
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("pointerleave", onPointerLeave);
       observer.disconnect();
