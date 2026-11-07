@@ -287,6 +287,104 @@ function numberParam(params: ShaderParams, name: string, fallback: number) {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback;
 }
 
+type Vec2 = [number, number];
+
+function cmul(a: Vec2, b: Vec2): Vec2 {
+  return [a[0] * b[0] - a[1] * b[1], a[0] * b[1] + a[1] * b[0]];
+}
+
+function cdiv(a: Vec2, b: Vec2): Vec2 {
+  const denominator = b[0] * b[0] + b[1] * b[1];
+  const numerator = cmul(a, [b[0], -b[1]]);
+  return [numerator[0] / denominator, numerator[1] / denominator];
+}
+
+function fwd(z: Vec2, a: Vec2, branch: number): Vec2 {
+  if (branch === 0) return cmul(a, z);
+  const scaled = cmul([a[0] - 1, a[1]], z);
+  return [1 + scaled[0], scaled[1]];
+}
+
+// Same search as the shader's bound(), once per frame instead of once per pixel.
+function boundRadius(a: Vec2, c: Vec2) {
+  const s0 = Math.hypot(a[0], a[1]);
+  const s1 = Math.hypot(a[0] - 1, a[1]);
+  let radius = 0;
+  for (let w = 0; w < 16; w++) {
+    let z: Vec2 = [c[0], c[1]];
+    let scale = 1;
+    for (let k = 0; k < 4; k++) {
+      const branch = (w >> k) & 1;
+      z = fwd(z, a, branch);
+      scale *= branch === 0 ? s0 : s1;
+    }
+    radius = Math.max(
+      radius,
+      Math.hypot(z[0] - c[0], z[1] - c[1]) / (1 - scale),
+    );
+  }
+  return radius * 1.001;
+}
+
+function sceneRadius(time: number, params: ShaderParams) {
+  const drift = time * numberParam(params, "u_drift", 0);
+  const wobX =
+    (Math.sin(drift * 0.037) + 0.5 * Math.sin(drift * 0.061 + 1.3)) / 1.5;
+  const wobY =
+    (Math.cos(drift * 0.029) + 0.5 * Math.sin(drift * 0.053 + 2.1)) / 1.5;
+  const morph = numberParam(params, "u_morph", 0);
+  const ax = numberParam(params, "u_apexX", 0.6) + morph * wobX;
+  const ay = numberParam(params, "u_apexY", 0.5) + morph * wobY;
+  return boundRadius([ax, ay], cdiv([0.5, 0], [1.5 - ax, -ay]));
+}
+
+// Column-major mat2(c, -s, s, c), matching the shader's rot().
+function rotate(angle: number, x: number, y: number): Vec2 {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [c * x + s * y, -s * x + c * y];
+}
+
+type CellGrid = {
+  originX: number;
+  originY: number;
+  texW: number;
+  texH: number;
+};
+
+function cellGrid(
+  width: number,
+  height: number,
+  angle: number,
+  cell: number,
+): CellGrid {
+  const corners = [
+    [0, 0],
+    [width, 0],
+    [0, height],
+    [width, height],
+  ];
+  let minX = Infinity;
+  let minY = Infinity;
+  let maxX = -Infinity;
+  let maxY = -Infinity;
+  for (const [x, y] of corners) {
+    const [gx, gy] = rotate(angle, x, y);
+    minX = Math.min(minX, gx / cell);
+    minY = Math.min(minY, gy / cell);
+    maxX = Math.max(maxX, gx / cell);
+    maxY = Math.max(maxY, gy / cell);
+  }
+  const originX = Math.floor(minX) - 2;
+  const originY = Math.floor(minY) - 2;
+  return {
+    originX,
+    originY,
+    texW: Math.ceil(maxX) - originX + 2,
+    texH: Math.ceil(maxY) - originY + 2,
+  };
+}
+
 type HeatFormat = { internal: number; format: number; type: number };
 
 type HeatTarget = { texture: WebGLTexture; framebuffer: WebGLFramebuffer };
@@ -309,7 +407,9 @@ function createHeatTarget(
   width: number,
   height: number,
   format: HeatFormat,
+  filter?: number,
 ): HeatTarget | null {
+  const texelFilter = filter ?? gl.LINEAR;
   const texture = gl.createTexture();
   const framebuffer = gl.createFramebuffer();
   if (!texture || !framebuffer) {
@@ -318,8 +418,8 @@ function createHeatTarget(
     return null;
   }
   gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, texelFilter);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, texelFilter);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
   gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
   gl.texImage2D(
@@ -353,6 +453,32 @@ function createHeatTarget(
   gl.clear(gl.COLOR_BUFFER_BIT);
   gl.bindFramebuffer(gl.FRAMEBUFFER, null);
   return { texture, framebuffer };
+}
+
+function fragmentVariant(defines: string) {
+  const body =
+    FRAGMENT_PRELUDE + fragmentSource.replace(CONTRACT_REDECLARE, "");
+  if (!defines) return body;
+  return body.replace("#version 300 es", `#version 300 es\n${defines}\n`);
+}
+
+type UniformSlot = { loc: WebGLUniformLocation; type: number };
+type UniformSlots = Map<string, UniformSlot>;
+
+function uniformSlots(
+  gl: WebGL2RenderingContext,
+  program: WebGLProgram,
+): UniformSlots {
+  const slots: UniformSlots = new Map();
+  const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
+  for (let i = 0; i < count; i++) {
+    const info = gl.getActiveUniform(program, i);
+    if (!info) continue;
+    const loc = gl.getUniformLocation(program, info.name);
+    if (!loc) continue;
+    slots.set(info.name, { loc, type: info.type });
+  }
+  return slots;
 }
 
 function linkProgram(
@@ -434,20 +560,40 @@ export function DragonFractal() {
     }
     gl.bindVertexArray(vao);
 
-    const dragon = linkProgram(
-      gl,
-      VERTEX_SRC,
-      FRAGMENT_PRELUDE + fragmentSource.replace(CONTRACT_REDECLARE, ""),
-    );
+    const linkDragon = (defines: string) =>
+      linkProgram(gl, VERTEX_SRC, fragmentVariant(defines));
+    const dragon = linkDragon("");
     if ("error" in dragon) {
       gl.deleteVertexArray(vao);
       setError(dragon.error);
       return;
     }
+    const cellWrite = linkDragon("#define CELL_WRITE");
+    if ("error" in cellWrite) {
+      gl.deleteProgram(dragon.program);
+      gl.deleteVertexArray(vao);
+      setError(cellWrite.error);
+      return;
+    }
+    const cellRead = linkDragon("#define CELL_READ");
+    if ("error" in cellRead) {
+      gl.deleteProgram(cellWrite.program);
+      gl.deleteProgram(dragon.program);
+      gl.deleteVertexArray(vao);
+      setError(cellRead.error);
+      return;
+    }
     const program = dragon.program;
+    const cellWriteProgram = cellWrite.program;
+    const cellReadProgram = cellRead.program;
+    const locations = uniformSlots(gl, program);
+    const cellWriteSlots = uniformSlots(gl, cellWriteProgram);
+    const cellReadSlots = uniformSlots(gl, cellReadProgram);
 
     const heatPass = linkProgram(gl, HEAT_VERTEX_SRC, HEAT_FRAGMENT_SRC);
     if ("error" in heatPass) {
+      gl.deleteProgram(cellReadProgram);
+      gl.deleteProgram(cellWriteProgram);
       gl.deleteProgram(program);
       gl.deleteVertexArray(vao);
       setError(heatPass.error);
@@ -455,28 +601,13 @@ export function DragonFractal() {
     }
     const heatProgram = heatPass.program;
 
-    gl.useProgram(program);
-
     const controls = shaderControls(fragmentSource);
     const params: ShaderParams = {};
     for (const control of controls) params[control.name] = control.value;
 
-    const count = gl.getProgramParameter(program, gl.ACTIVE_UNIFORMS) as number;
-    const locations = new Map<
-      string,
-      { loc: WebGLUniformLocation; type: number }
-    >();
-    for (let i = 0; i < count; i++) {
-      const info = gl.getActiveUniform(program, i);
-      if (!info) continue;
-      const loc = gl.getUniformLocation(program, info.name);
-      if (!loc) continue;
-      locations.set(info.name, { loc, type: info.type });
-    }
-
-    const applyControls = () => {
+    const applyControls = (slots: UniformSlots) => {
       for (const control of controls) {
-        const slot = locations.get(control.name);
+        const slot = slots.get(control.name);
         if (!slot) continue;
         const current = params[control.name];
         if (
@@ -495,18 +626,38 @@ export function DragonFractal() {
         }
       }
     };
-    applyControls();
+
+    const bindDragonSamplers = (dragonProgram: WebGLProgram) => {
+      gl.useProgram(dragonProgram);
+      const heat = gl.getUniformLocation(dragonProgram, "u_heatMap");
+      if (heat) gl.uniform1i(heat, 0);
+      const cell = gl.getUniformLocation(dragonProgram, "u_cellMap");
+      if (cell) gl.uniform1i(cell, 1);
+    };
+    bindDragonSamplers(program);
+    bindDragonSamplers(cellWriteProgram);
+    bindDragonSamplers(cellReadProgram);
 
     const pane = mountShaderPane(controls, params);
-
-    const resolution = locations.get("u_resolution");
-    const time = locations.get("u_time");
-    const scale = locations.get("u_scale");
-    const position = locations.get("u_position");
-    if (scale) gl.uniform1f(scale.loc, 1);
-    if (position) gl.uniform2f(position.loc, 0, 0);
-    const heatMap = gl.getUniformLocation(program, "u_heatMap");
-    if (heatMap) gl.uniform1i(heatMap, 0);
+    const perf = {
+      frameCap: true,
+      singleSample: true,
+      cellSamples: false,
+      sharedRadius: true,
+      coarseHeat: true,
+      halfRes: false,
+    };
+    const lowPower = pane.addFolder({
+      title: "Low power",
+      expanded: true,
+      index: 0,
+    });
+    lowPower.addBinding(perf, "frameCap", { label: "30 fps" });
+    lowPower.addBinding(perf, "singleSample", { label: "Single sample" });
+    lowPower.addBinding(perf, "cellSamples", { label: "Cell samples" });
+    lowPower.addBinding(perf, "sharedRadius", { label: "Shared radius" });
+    lowPower.addBinding(perf, "coarseHeat", { label: "Coarse heat" });
+    lowPower.addBinding(perf, "halfRes", { label: "Half resolution" });
 
     gl.useProgram(heatProgram);
     const heatPrev = gl.getUniformLocation(heatProgram, "u_prev");
@@ -520,14 +671,11 @@ export function DragonFractal() {
     const heatSpread = gl.getUniformLocation(heatProgram, "u_heatSpread");
     gl.useProgram(program);
 
-    const pointer = { x: 0, y: 0, inside: false };
+    const pointer = { nx: 0, ny: 0, inside: false };
     const placePointer = (event: PointerEvent) => {
       const rect = canvas.getBoundingClientRect();
-      pointer.x =
-        ((event.clientX - rect.left) / Math.max(rect.width, 1)) * canvas.width;
-      pointer.y =
-        ((rect.bottom - event.clientY) / Math.max(rect.height, 1)) *
-        canvas.height;
+      pointer.nx = (event.clientX - rect.left) / Math.max(rect.width, 1);
+      pointer.ny = (rect.bottom - event.clientY) / Math.max(rect.height, 1);
     };
     const onPointerMove = (event: PointerEvent) => {
       placePointer(event);
@@ -540,8 +688,9 @@ export function DragonFractal() {
     canvas.addEventListener("pointerleave", onPointerLeave);
 
     const resize = () => {
-      const width = Math.max(1, canvas.clientWidth);
-      const height = Math.max(1, canvas.clientHeight);
+      const scale = perf.halfRes ? 0.5 : 1;
+      const width = Math.max(1, Math.round(canvas.clientWidth * scale));
+      const height = Math.max(1, Math.round(canvas.clientHeight * scale));
       if (canvas.width !== width || canvas.height !== height) {
         canvas.width = width;
         canvas.height = height;
@@ -557,12 +706,25 @@ export function DragonFractal() {
     const started = performance.now();
     let frame = 0;
     let lastNow = started;
+    let lastPresented = 0;
+    const frameCapMs = 1000 / 30;
     const formats = heatFormats(gl);
     let formatIndex = 0;
     const heatTargets: HeatTarget[] = [];
     let heatW = 0;
     let heatH = 0;
     let heatIndex = 0;
+    let heatReset = false;
+    let heatEnvelope = 0;
+    let cellTarget: HeatTarget | null = null;
+    let cellW = 0;
+    let cellH = 0;
+    let cellFormatIndex = 0;
+    let elapsed = 0;
+    let screenW = 1;
+    let screenH = 1;
+    let shared = false;
+    let radius = 0;
 
     const destroyHeat = () => {
       for (const target of heatTargets) {
@@ -575,10 +737,12 @@ export function DragonFractal() {
     };
 
     const ensureHeat = (width: number, height: number) => {
+      heatReset = false;
       if (heatTargets.length === 2 && heatW === width && heatH === height) {
         return true;
       }
       destroyHeat();
+      heatReset = true;
       while (formatIndex < formats.length) {
         const format = formats[formatIndex];
         const first = createHeatTarget(gl, width, height, format);
@@ -601,53 +765,173 @@ export function DragonFractal() {
       return false;
     };
 
+    const destroyCell = () => {
+      if (!cellTarget) return;
+      gl.deleteFramebuffer(cellTarget.framebuffer);
+      gl.deleteTexture(cellTarget.texture);
+      cellTarget = null;
+      cellW = 0;
+      cellH = 0;
+    };
+
+    const ensureCell = (width: number, height: number) => {
+      const max = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
+      if (width > max || height > max) return false;
+      if (cellTarget && cellW === width && cellH === height) return true;
+      destroyCell();
+      while (cellFormatIndex < formats.length) {
+        const target = createHeatTarget(
+          gl,
+          width,
+          height,
+          formats[cellFormatIndex],
+          gl.NEAREST,
+        );
+        if (target) {
+          cellTarget = target;
+          cellW = width;
+          cellH = height;
+          return true;
+        }
+        cellFormatIndex += 1;
+      }
+      return false;
+    };
+
+    const paintDragon = (
+      dragonProgram: WebGLProgram,
+      slots: UniformSlots,
+      viewW: number,
+      viewH: number,
+      grid?: CellGrid,
+    ) => {
+      gl.useProgram(dragonProgram);
+      gl.viewport(0, 0, viewW, viewH);
+      const resolution = slots.get("u_resolution");
+      const time = slots.get("u_time");
+      const scale = slots.get("u_scale");
+      const position = slots.get("u_position");
+      const samples = slots.get("u_aa");
+      const boundFlag = slots.get("u_useBound");
+      const boundValue = slots.get("u_boundR");
+      if (resolution) gl.uniform2f(resolution.loc, screenW, screenH);
+      if (time) gl.uniform1f(time.loc, elapsed);
+      if (scale) gl.uniform1f(scale.loc, 1);
+      if (position) gl.uniform2f(position.loc, 0, 0);
+      if (samples) gl.uniform1i(samples.loc, perf.singleSample ? 1 : 2);
+      if (boundFlag) gl.uniform1i(boundFlag.loc, shared ? 1 : 0);
+      if (boundValue && shared) gl.uniform1f(boundValue.loc, radius);
+      if (grid) {
+        const origin = slots.get("u_cellOrigin");
+        const texSize = slots.get("u_cellTexSize");
+        if (origin) gl.uniform2f(origin.loc, grid.originX, grid.originY);
+        if (texSize) gl.uniform2f(texSize.loc, grid.texW, grid.texH);
+      }
+      applyControls(slots);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    };
+
     const draw = (now: number) => {
+      if (perf.frameCap && now - lastPresented < frameCapMs - 1) {
+        frame = requestAnimationFrame(draw);
+        return;
+      }
+      lastPresented = now;
+
       stats.begin();
+      resize();
       const dt = Math.min(0.05, (now - lastNow) / 1000);
       lastNow = now;
-      const width = canvas.width;
-      const height = canvas.height;
-      if (!ensureHeat(width, height)) {
+      screenW = canvas.width;
+      screenH = canvas.height;
+      const heatScale = perf.coarseHeat ? 0.25 : 1;
+      const heatWidth = Math.max(1, Math.round(screenW * heatScale));
+      const heatHeight = Math.max(1, Math.round(screenH * heatScale));
+      if (!ensureHeat(heatWidth, heatHeight)) {
         stats.end();
         setError("WebGL2 could not store the heat field.");
         return;
       }
 
-      const src = heatIndex;
-      const dst = 1 - heatIndex;
-      gl.bindFramebuffer(gl.FRAMEBUFFER, heatTargets[dst].framebuffer);
-      gl.viewport(0, 0, width, height);
-      gl.useProgram(heatProgram);
+      const dissipate = numberParam(params, "u_heatDissipate", 0.2);
+      if (heatReset || pointer.inside) heatEnvelope = pointer.inside ? 1 : 0;
+      else heatEnvelope *= Math.exp(-dt * Math.max(dissipate, 0));
+      const heatLive = !perf.coarseHeat || heatEnvelope > 1 / 255;
+
+      let heatTexture = heatTargets[heatIndex].texture;
+      if (heatLive) {
+        const src = heatIndex;
+        const dst = 1 - heatIndex;
+        gl.bindFramebuffer(gl.FRAMEBUFFER, heatTargets[dst].framebuffer);
+        gl.viewport(0, 0, heatWidth, heatHeight);
+        gl.useProgram(heatProgram);
+        gl.activeTexture(gl.TEXTURE0);
+        gl.bindTexture(gl.TEXTURE_2D, heatTargets[src].texture);
+        if (heatResolution) gl.uniform2f(heatResolution, heatWidth, heatHeight);
+        if (heatMouse) {
+          gl.uniform2f(
+            heatMouse,
+            pointer.nx * heatWidth,
+            pointer.ny * heatHeight,
+          );
+        }
+        if (heatDt) gl.uniform1f(heatDt, dt);
+        if (heatDeposit) gl.uniform1f(heatDeposit, pointer.inside ? 1 : 0);
+        if (heatRadius) {
+          gl.uniform1f(heatRadius, numberParam(params, "u_heatRadius", 0.1));
+        }
+        if (heatDissipate) gl.uniform1f(heatDissipate, dissipate);
+        if (heatSpread) {
+          gl.uniform1f(
+            heatSpread,
+            numberParam(params, "u_heatSpread", 8) * heatScale,
+          );
+        }
+        gl.drawArrays(gl.TRIANGLES, 0, 3);
+        heatIndex = dst;
+        heatTexture = heatTargets[dst].texture;
+      }
+
+      elapsed = (now - started) / 1000;
+      // Slightly outside the shader's circle so CPU rounding cannot open a seam.
+      radius = perf.sharedRadius ? sceneRadius(elapsed, params) * 1.0005 : 0;
+      shared = perf.sharedRadius && Number.isFinite(radius) && radius > 0;
+
       gl.activeTexture(gl.TEXTURE0);
-      gl.bindTexture(gl.TEXTURE_2D, heatTargets[src].texture);
-      if (heatResolution) gl.uniform2f(heatResolution, width, height);
-      if (heatMouse) gl.uniform2f(heatMouse, pointer.x, pointer.y);
-      if (heatDt) gl.uniform1f(heatDt, dt);
-      if (heatDeposit) gl.uniform1f(heatDeposit, pointer.inside ? 1 : 0);
-      if (heatRadius) {
-        gl.uniform1f(heatRadius, numberParam(params, "u_heatRadius", 0.1));
-      }
-      if (heatDissipate) {
-        gl.uniform1f(
-          heatDissipate,
-          numberParam(params, "u_heatDissipate", 0.2),
+      gl.bindTexture(gl.TEXTURE_2D, heatTexture);
+
+      let drewCells = false;
+      if (perf.cellSamples) {
+        const grid = cellGrid(
+          screenW,
+          screenH,
+          numberParam(params, "u_angle", 2.25),
+          Math.max(numberParam(params, "u_cell", 6.4), 0.001),
         );
+        if (ensureCell(grid.texW, grid.texH) && cellTarget) {
+          gl.bindFramebuffer(gl.FRAMEBUFFER, cellTarget.framebuffer);
+          paintDragon(
+            cellWriteProgram,
+            cellWriteSlots,
+            grid.texW,
+            grid.texH,
+            grid,
+          );
+          gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+          gl.activeTexture(gl.TEXTURE1);
+          gl.bindTexture(gl.TEXTURE_2D, cellTarget.texture);
+          gl.activeTexture(gl.TEXTURE0);
+          paintDragon(cellReadProgram, cellReadSlots, screenW, screenH, grid);
+          drewCells = true;
+        }
+      } else if (cellTarget) {
+        destroyCell();
       }
-      if (heatSpread) {
-        gl.uniform1f(heatSpread, numberParam(params, "u_heatSpread", 8));
+      if (!drewCells) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        paintDragon(program, locations, screenW, screenH);
       }
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
 
-      gl.bindFramebuffer(gl.FRAMEBUFFER, null);
-      gl.viewport(0, 0, width, height);
-      gl.useProgram(program);
-      gl.bindTexture(gl.TEXTURE_2D, heatTargets[dst].texture);
-      if (resolution) gl.uniform2f(resolution.loc, width, height);
-      if (time) gl.uniform1f(time.loc, (now - started) / 1000);
-      applyControls();
-      gl.drawArrays(gl.TRIANGLES, 0, 3);
-
-      heatIndex = dst;
       stats.end();
       frame = requestAnimationFrame(draw);
     };
@@ -660,8 +944,11 @@ export function DragonFractal() {
       canvas.removeEventListener("pointerleave", onPointerLeave);
       observer.disconnect();
       pane.dispose();
+      destroyCell();
       destroyHeat();
       gl.deleteProgram(heatProgram);
+      gl.deleteProgram(cellReadProgram);
+      gl.deleteProgram(cellWriteProgram);
       gl.deleteProgram(program);
       gl.deleteVertexArray(vao);
     };

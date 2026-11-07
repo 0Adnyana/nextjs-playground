@@ -7,10 +7,10 @@
 // lifts the ink, the halftone gives way to the solid curve.
 
 // ---- Tweakable settings ----
-uniform vec3  u_color0;  // color #030d19
-uniform vec3  u_color1;  // color #05172e
-uniform vec3  u_color2;  // color #4790f0
-uniform vec3  u_color3;  // color #082244
+uniform vec3  u_color0;  // color #0b1c30
+uniform vec3  u_color1;  // color #102846
+uniform vec3  u_color2;  // color #183760
+uniform vec3  u_color3;  // color #4790f0
 uniform float u_apexX;   // 0.40, 0.65, 0.60
 uniform float u_apexY;   // 0.40, 0.62, 0.50
 uniform float u_zoom;    // 0.0, 0.5, 0.10
@@ -47,7 +47,13 @@ uniform float u_heatLift;      // 0.0, 1.0, 1.0
 // ---- Quality ----
 const int MAX_DEPTH = 24;   // detail cap
 const int BUDGET    = 800;  // search steps per sample
-const int AA        = 2;    // 1 = fastest, 2 = smooth edges
+uniform int u_aa;           // 1 = fastest, 2 = smooth edges
+uniform int u_useBound;
+uniform float u_boundR;
+uniform vec2 u_cellOrigin;
+uniform vec2 u_cellTexSize;
+uniform sampler2D u_cellMap;
+const int AA_MAX    = 2;
 const int EXTRA     = 3;    // safety steps toward the tip (prevents seams)
 
 const vec2 ONE = vec2(1.0, 0.0);
@@ -189,7 +195,8 @@ void main() {
                     cos(T * 0.029) + 0.5 * sin(T * 0.053 + 2.1)) / 1.5;
     gA = vec2(u_apexX, u_apexY) + u_morph * wob;
     gC = cdiv(0.5 * ONE, 1.5 * ONE - gA);
-    gR = bound(gA, gC);
+    if (u_useBound != 0) gR = u_boundR;
+    else gR = bound(gA, gC);
     gSa = length(gA);
     gSmax = max(gSa, length(gA - ONE));
 
@@ -202,9 +209,18 @@ void main() {
     gCam = cmul(cam, vec2(cos(spin), sin(spin))) * u_view;
     gCamScale = length(gCam);
 
+    float pixUV = 2.0 / u_resolution.y; // one screen pixel in uv units
+
+#ifdef CELL_WRITE
+    // One dragon sample per halftone cell. The screen pass only draws the dot.
+    vec2 cellId = gl_FragCoord.xy - 0.5 + u_cellOrigin;
+    vec2 cellCenter = rot(-u_angle) * ((cellId + 0.5) * u_cell);
+    vec3 cellCol = vec3(0.0);
+    bool cellHit = sampleDragon(pxToUV(cellCenter), 0.5 * u_cell * pixUV, cellCol);
+    fragColor = cellHit ? vec4(cellCol, 1.0) : vec4(0.0);
+#else
     vec2 px = v_uv * u_resolution;
     vec2 fragPx = gl_FragCoord.xy;
-    float pixUV = 2.0 / u_resolution.y; // one screen pixel in uv units
 
     // Palette brightness reference: the brightest of the four colors
     float l0 = luma(u_color0), l1 = luma(u_color1), l2 = luma(u_color2), l3 = luma(u_color3);
@@ -215,9 +231,12 @@ void main() {
     // ---- Solid layer: the dragon at full resolution (bright parts) ----
     vec3 colSum = vec3(0.0);
     float hits = 0.0;
-    for (int j = 0; j < AA; j++) {
-        for (int i = 0; i < AA; i++) {
-            vec2 o = (vec2(float(i), float(j)) + 0.5) / float(AA) - 0.5;
+    int aa = clamp(u_aa, 1, AA_MAX);
+    for (int j = 0; j < AA_MAX; j++) {
+        if (j >= aa) break;
+        for (int i = 0; i < AA_MAX; i++) {
+            if (i >= aa) break;
+            vec2 o = (vec2(float(i), float(j)) + 0.5) / float(aa) - 0.5;
             vec3 sc;
             if (sampleDragon(pxToUV(px + o), pixUV, sc)) {
                 colSum += heatColor(sc, heatAt(fragPx + o));
@@ -225,7 +244,7 @@ void main() {
             }
         }
     }
-    float cover = hits / float(AA * AA);
+    float cover = hits / float(aa * aa);
     vec3 colP = hits > 0.0 ? colSum / hits : vec3(0.0);
     float solidP = smoothstep(0.8, 1.0, luma(colP) / cutL);
     float solidW = mix(1.0, solidP, u_dither);
@@ -235,10 +254,17 @@ void main() {
     vec2 grid = rot(u_angle) * px / u_cell;
     vec2 id   = floor(grid);
     vec2 f    = fract(grid) - 0.5;
-    vec2 centerPx = rot(-u_angle) * ((id + 0.5) * u_cell);
 
-    vec3 colC;
-    bool hitC = sampleDragon(pxToUV(centerPx), 0.5 * u_cell * pixUV, colC);
+    vec3 colC = vec3(0.0);
+    bool hitC;
+#ifdef CELL_READ
+    vec4 cached = texture(u_cellMap, (id - u_cellOrigin + 0.5) / u_cellTexSize);
+    colC = cached.rgb;
+    hitC = cached.a > 0.5;
+#else
+    vec2 centerPx = rot(-u_angle) * ((id + 0.5) * u_cell);
+    hitC = sampleDragon(pxToUV(centerPx), 0.5 * u_cell * pixUV, colC);
+#endif
 
     vec4 dots = vec4(0.0);
     if (hitC) {
@@ -258,4 +284,5 @@ void main() {
     // Premultiplied alpha: solid over dots, everything else fully transparent.
     vec4 ink = solid + dots * (1.0 - solid.a);
     fragColor = ink * u_opacity;
+#endif
 }
