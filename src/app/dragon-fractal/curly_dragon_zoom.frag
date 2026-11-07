@@ -2,9 +2,10 @@
 // The camera zooms forever into the dragon's tip. Because the dragon is made of
 // smaller copies of itself, new curls keep growing out of the center endlessly.
 // Darker colors are drawn as a rotated halftone: one crisp dot per grid cell,
-// sized by how bright the dragon is at that cell's center. Lighter colors are
-// drawn solid. Hovering paints a heat field that cools and spreads; as it
-// lifts the ink, the halftone gives way to the solid curve.
+// smaller as the ink gets darker. Lighter colors are drawn solid. Hovering
+// paints a heat field that cools and spreads. The lift recolors the ink,
+// grows the dots, and, once it is as bright as the lightest stop, draws the
+// curve solid. Both the size and the solid fade back as the heat cools.
 
 // ---- Tweakable settings ----
 uniform vec3  u_color0;  // color #0b1c30
@@ -31,13 +32,14 @@ uniform float u_cell;    // 4.0, 48.0, 6.4
 uniform float u_dot;     // 0.2, 2.0, 1.73
 uniform float u_angle;   // 0.0, 6.28, 2.25
 uniform float u_dotCut;  // 0.05, 1.0, 1.0
-uniform float u_dotMin;  // 0.0, 1.0, 0.29
+uniform float u_dotMin;  // 0.0, 1.0, 0.12
 uniform float u_dotTint; // 0.0, 1.0, 0.0
 
 // ---- Heat ----
 // Screen-space field. Radius, dissipate, and spread drive it each frame.
-// Lift mixes toward the heat color before the halftone test, so lighter ink
-// is drawn solid instead of as dots.
+// Lift recolors the ink and grows the dots. At the brightness of the lightest
+// stop the curve is drawn solid, the same as that color, then returns to
+// dots as the spot cools.
 uniform vec3  u_heatColor;     // color #adc9ed
 uniform float u_heatRadius;    // 0.02, 0.80, 0.10
 uniform float u_heatDissipate; // 0.0, 3.0, 0.20
@@ -89,16 +91,34 @@ float bound(vec2 a, vec2 c) {
     return R * 1.001;
 }
 
+// Hex stops are gamma-encoded. Blend in linear light so a midpoint is halfway
+// in brightness, then encode back for the framebuffer.
+vec3 srgbToLinear(vec3 c) {
+    vec3 lo = c / 12.92;
+    vec3 hi = pow((c + 0.055) / 1.055, vec3(2.4));
+    return mix(lo, hi, step(vec3(0.04045), c));
+}
+
+vec3 linearToSrgb(vec3 c) {
+    c = max(c, vec3(0.0));
+    vec3 lo = c * 12.92;
+    vec3 hi = 1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055;
+    return mix(lo, hi, step(vec3(0.0031308), c));
+}
+
+// Color 1 → 2 → 3 → 4 → 3 → 2 → 1, then repeat. The parameter moves at a
+// constant rate, and each leg between stops takes the same share of the cycle.
 vec3 gradientMap(float x) {
-    x = fract(x) * 4.0;
-    float f = smoothstep(0.0, 1.0, fract(x));
-    int i = int(floor(x));
-    vec3 a, b;
-    if (i == 0)      { a = u_color0; b = u_color1; }
-    else if (i == 1) { a = u_color1; b = u_color2; }
+    float p = fract(x);
+    float tri = p < 0.5 ? p * 2.0 : 2.0 - p * 2.0;
+    float g = tri * 3.0;
+    int i = int(min(floor(g), 2.0));
+    float f = g - float(i);
+    vec3 a = u_color0;
+    vec3 b = u_color1;
+    if (i == 1)      { a = u_color1; b = u_color2; }
     else if (i == 2) { a = u_color2; b = u_color3; }
-    else             { a = u_color3; b = u_color0; }
-    return mix(a, b, f);
+    return linearToSrgb(mix(srgbToLinear(a), srgbToLinear(b), f));
 }
 
 float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
@@ -107,8 +127,7 @@ float heatAt(vec2 screenPx) {
     return texture(u_heatMap, screenPx / u_resolution).r;
 }
 
-// Lift runs before the solid-versus-dot test. A color that becomes light
-// takes the solid path; the dots fade out over the same threshold.
+// Mix toward the heat color. The dot radius tracks the same amount.
 vec3 heatColor(vec3 col, float heat) {
     float t = clamp(heat, 0.0, 1.0) * u_heatLift;
     return mix(col, u_heatColor, t);
@@ -225,6 +244,7 @@ void main() {
     // Palette brightness reference: the brightest of the four colors
     float l0 = luma(u_color0), l1 = luma(u_color1), l2 = luma(u_color2), l3 = luma(u_color3);
     float lmax = max(max(l0, l1), max(l2, l3));
+    float lmin = min(min(l0, l1), min(l2, l3));
     vec3 brightest = lmax == l0 ? u_color0 : lmax == l1 ? u_color1 : lmax == l2 ? u_color2 : u_color3;
     float cutL = max(lmax * u_dotCut, 1e-4);
 
@@ -246,6 +266,8 @@ void main() {
     }
     float cover = hits / float(aa * aa);
     vec3 colP = hits > 0.0 ? colSum / hits : vec3(0.0);
+    // Same test as the lightest stop: once the lifted ink is that bright,
+    // draw the full-resolution curve instead of the halftone.
     float solidP = smoothstep(0.8, 1.0, luma(colP) / cutL);
     float solidW = mix(1.0, solidP, u_dither);
     vec4 solid = vec4(colP * cover, cover) * solidW;
@@ -268,15 +290,18 @@ void main() {
 
     vec4 dots = vec4(0.0);
     if (hitC) {
-        // Dot size stays with the unheated ink. Presence follows the lifted
-        // color, so a pixel that has become light loses its dot.
-        float tone = mix(u_dotMin, 1.0, clamp(luma(colC) / cutL, 0.0, 1.0));
+        // Darker ink draws a smaller dot. Hovering mixes that size toward a
+        // full dot, and the radius follows the heat back down as it cools.
+        float heat = clamp(heatAt(fragPx), 0.0, 1.0);
+        vec3 shown = heatColor(colC, heat);
+        float span = max(cutL - lmin, 1e-4);
+        float cold = clamp((luma(colC) - lmin) / span, 0.0, 1.0);
+        float bright = mix(cold, 1.0, heat * clamp(u_heatLift, 0.0, 1.0));
+        float tone = mix(u_dotMin, 1.0, bright);
         float radius = tone * 0.5 * u_dot;
         float aa = 1.5 / u_cell;
         float mask = 1.0 - smoothstep(radius - aa, radius + aa, length(f));
-        vec3 shown = heatColor(colC, heatAt(fragPx));
-        float lr = luma(shown) / cutL;
-        float a = mask * (1.0 - smoothstep(0.8, 1.0, lr)) * u_dither;
+        float a = mask * (1.0 - smoothstep(0.8, 1.0, luma(shown) / cutL)) * u_dither;
         vec3 dc = mix(shown, brightest, u_dotTint * (1.0 - tone));
         dots = vec4(dc * a, a);
     }
