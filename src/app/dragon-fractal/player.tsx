@@ -113,11 +113,41 @@ type ShaderControl =
 
 type ShaderParams = Record<string, number | string>;
 
+const NO_DEFINES: ReadonlySet<string> = new Set();
+
 // Shader comments are the tweak contract: `min, max, default`, or `color #rrggbb`.
-function shaderControls(source: string): ShaderControl[] {
+// `#ifdef` / `#ifndef` branches follow the same defines the shader is compiled with.
+function shaderControls(
+  source: string,
+  defines: ReadonlySet<string> = NO_DEFINES,
+): ShaderControl[] {
   const controls: ShaderControl[] = [];
   let section = "Shader";
+  const stack: { parent: boolean; active: boolean }[] = [
+    { parent: true, active: true },
+  ];
+  const taking = () => stack[stack.length - 1]?.active ?? true;
   for (const line of source.split("\n")) {
+    const branch = line.match(/^\s*#\s*if(n)?def\s+([A-Za-z_]\w*)/);
+    if (branch) {
+      const parent = taking();
+      const defined = defines.has(branch[2]);
+      const cond = branch[1] ? !defined : defined;
+      stack.push({ parent, active: parent && cond });
+      continue;
+    }
+    if (/^\s*#\s*else\b/.test(line)) {
+      const frame = stack[stack.length - 1];
+      if (frame && stack.length > 1) {
+        frame.active = frame.parent && !frame.active;
+      }
+      continue;
+    }
+    if (/^\s*#\s*endif\b/.test(line)) {
+      if (stack.length > 1) stack.pop();
+      continue;
+    }
+    if (!taking()) continue;
     const heading = line.match(/^\s*\/\/\s*-+\s*(.+?)\s*-+\s*$/);
     if (heading) {
       section = heading[1];
@@ -333,7 +363,7 @@ function sceneRadius(time: number, params: ShaderParams) {
   const wobY =
     (Math.cos(drift * 0.029) + 0.5 * Math.sin(drift * 0.053 + 2.1)) / 1.5;
   const morph = numberParam(params, "u_morph", 0);
-  const ax = numberParam(params, "u_apexX", 0.6) + morph * wobX;
+  const ax = numberParam(params, "u_apexX", 0.5) + morph * wobX;
   const ay = numberParam(params, "u_apexY", 0.5) + morph * wobY;
   return boundRadius([ax, ay], cdiv([0.5, 0], [1.5 - ax, -ay]));
 }
@@ -357,7 +387,9 @@ function cellGrid(
   height: number,
   angle: number,
   cell: number,
+  aspect = 1,
 ): CellGrid {
+  const cellX = cell * aspect;
   const corners = [
     [0, 0],
     [width, 0],
@@ -370,9 +402,9 @@ function cellGrid(
   let maxY = -Infinity;
   for (const [x, y] of corners) {
     const [gx, gy] = rotate(angle, x, y);
-    minX = Math.min(minX, gx / cell);
+    minX = Math.min(minX, gx / cellX);
     minY = Math.min(minY, gy / cell);
-    maxX = Math.max(maxX, gx / cell);
+    maxX = Math.max(maxX, gx / cellX);
     maxY = Math.max(maxY, gy / cell);
   }
   const originX = Math.floor(minX) - 2;
@@ -455,6 +487,40 @@ function createHeatTarget(
   return { texture, framebuffer };
 }
 
+const GLYPH_FONT =
+  '600 120px ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace';
+
+function createGlyphAtlas(glyphs: string) {
+  const measure = document.createElement("canvas").getContext("2d");
+  if (!measure || glyphs.length === 0) return null;
+  measure.font = GLYPH_FONT;
+  const probe = measure.measureText("Mg@#%");
+  const advance = measure.measureText("M").width;
+  if (!Number.isFinite(advance) || advance <= 0) return null;
+  const ascent = probe.actualBoundingBoxAscent || 96;
+  const descent = probe.actualBoundingBoxDescent || 24;
+  const padX = Math.ceil(advance * 0.12);
+  const padY = Math.ceil((ascent + descent) * 0.14);
+  const tileW = Math.ceil(advance + padX * 2);
+  const tileH = Math.ceil(ascent + descent + padY * 2);
+  const canvas = document.createElement("canvas");
+  canvas.width = tileW * glyphs.length;
+  canvas.height = tileH;
+  const ctx = canvas.getContext("2d", { alpha: true });
+  if (!ctx) return null;
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  ctx.font = GLYPH_FONT;
+  ctx.fillStyle = "#ffffff";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "alphabetic";
+  const baseline = padY + ascent;
+  for (let i = 0; i < glyphs.length; i++) {
+    if (glyphs[i] === " ") continue;
+    ctx.fillText(glyphs[i], (i + 0.5) * tileW, baseline);
+  }
+  return { canvas, aspect: tileW / tileH };
+}
+
 function fragmentVariant(defines: string) {
   const body =
     FRAGMENT_PRELUDE + fragmentSource.replace(CONTRACT_REDECLARE, "");
@@ -535,7 +601,7 @@ function compileShader(
   return { shader };
 }
 
-export function DragonFractal() {
+export function DragonFractal({ glyphs }: { glyphs?: string } = {}) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -560,8 +626,13 @@ export function DragonFractal() {
     }
     gl.bindVertexArray(vao);
 
+    const modeDefine = glyphs ? "#define ASCII" : "";
     const linkDragon = (defines: string) =>
-      linkProgram(gl, VERTEX_SRC, fragmentVariant(defines));
+      linkProgram(
+        gl,
+        VERTEX_SRC,
+        fragmentVariant([modeDefine, defines].filter(Boolean).join("\n")),
+      );
     const dragon = linkDragon("");
     if ("error" in dragon) {
       gl.deleteVertexArray(vao);
@@ -601,7 +672,10 @@ export function DragonFractal() {
     }
     const heatProgram = heatPass.program;
 
-    const controls = shaderControls(fragmentSource);
+    const controls = shaderControls(
+      fragmentSource,
+      glyphs ? new Set(["ASCII"]) : NO_DEFINES,
+    );
     const params: ShaderParams = {};
     for (const control of controls) params[control.name] = control.value;
 
@@ -627,12 +701,54 @@ export function DragonFractal() {
       }
     };
 
+    let glyphTexture: WebGLTexture | null = null;
+    let glyphAspect = 1;
+    if (glyphs) {
+      const atlas = createGlyphAtlas(glyphs);
+      const texture = atlas ? gl.createTexture() : null;
+      if (!atlas || !texture) {
+        if (texture) gl.deleteTexture(texture);
+        gl.deleteProgram(heatProgram);
+        gl.deleteProgram(cellReadProgram);
+        gl.deleteProgram(cellWriteProgram);
+        gl.deleteProgram(program);
+        gl.deleteVertexArray(vao);
+        setError("Could not build the ASCII glyph atlas.");
+        return;
+      }
+      glyphTexture = texture;
+      glyphAspect = atlas.aspect;
+      gl.activeTexture(gl.TEXTURE2);
+      gl.bindTexture(gl.TEXTURE_2D, texture);
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, true);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texImage2D(
+        gl.TEXTURE_2D,
+        0,
+        gl.RGBA,
+        gl.RGBA,
+        gl.UNSIGNED_BYTE,
+        atlas.canvas,
+      );
+      gl.pixelStorei(gl.UNPACK_FLIP_Y_WEBGL, false);
+      gl.activeTexture(gl.TEXTURE0);
+    }
+
     const bindDragonSamplers = (dragonProgram: WebGLProgram) => {
       gl.useProgram(dragonProgram);
       const heat = gl.getUniformLocation(dragonProgram, "u_heatMap");
       if (heat) gl.uniform1i(heat, 0);
       const cell = gl.getUniformLocation(dragonProgram, "u_cellMap");
       if (cell) gl.uniform1i(cell, 1);
+      const glyphMap = gl.getUniformLocation(dragonProgram, "u_glyphMap");
+      if (glyphMap) gl.uniform1i(glyphMap, 2);
+      const glyphCount = gl.getUniformLocation(dragonProgram, "u_glyphCount");
+      if (glyphCount && glyphs) gl.uniform1f(glyphCount, glyphs.length);
+      const cellAspect = gl.getUniformLocation(dragonProgram, "u_cellAspect");
+      if (cellAspect) gl.uniform1f(cellAspect, glyphAspect);
     };
     bindDragonSamplers(program);
     bindDragonSamplers(cellWriteProgram);
@@ -853,7 +969,7 @@ export function DragonFractal() {
         return;
       }
 
-      const dissipate = numberParam(params, "u_heatDissipate", 0.2);
+      const dissipate = numberParam(params, "u_heatDissipate", 0.1);
       if (heatReset || pointer.inside) heatEnvelope = pointer.inside ? 1 : 0;
       else heatEnvelope *= Math.exp(-dt * Math.max(dissipate, 0));
       const heatLive = !perf.coarseHeat || heatEnvelope > 1 / 255;
@@ -884,7 +1000,7 @@ export function DragonFractal() {
         if (heatSpread) {
           gl.uniform1f(
             heatSpread,
-            numberParam(params, "u_heatSpread", 8) * heatScale,
+            numberParam(params, "u_heatSpread", 0.8) * heatScale,
           );
         }
         gl.drawArrays(gl.TRIANGLES, 0, 3);
@@ -905,8 +1021,9 @@ export function DragonFractal() {
         const grid = cellGrid(
           screenW,
           screenH,
-          numberParam(params, "u_angle", 2.25),
-          Math.max(numberParam(params, "u_cell", 6.4), 0.001),
+          numberParam(params, "u_angle", glyphs ? 0 : 2.0),
+          Math.max(numberParam(params, "u_cell", glyphs ? 16 : 6.4), 0.001),
+          glyphAspect,
         );
         if (ensureCell(grid.texW, grid.texH) && cellTarget) {
           gl.bindFramebuffer(gl.FRAMEBUFFER, cellTarget.framebuffer);
@@ -944,6 +1061,7 @@ export function DragonFractal() {
       canvas.removeEventListener("pointerleave", onPointerLeave);
       observer.disconnect();
       pane.dispose();
+      if (glyphTexture) gl.deleteTexture(glyphTexture);
       destroyCell();
       destroyHeat();
       gl.deleteProgram(heatProgram);
@@ -952,7 +1070,7 @@ export function DragonFractal() {
       gl.deleteProgram(program);
       gl.deleteVertexArray(vao);
     };
-  }, []);
+  }, [glyphs]);
 
   return (
     <>

@@ -2,17 +2,18 @@
 // The camera zooms forever into the dragon's tip. Because the dragon is made of
 // smaller copies of itself, new curls keep growing out of the center endlessly.
 // Darker colors are drawn as a rotated halftone: one crisp dot per grid cell,
-// smaller as the ink gets darker. Lighter colors are drawn solid. Hovering
-// paints a heat field that cools and spreads. The lift recolors the ink,
-// grows the dots, and, once it is as bright as the lightest stop, draws the
-// curve solid. Both the size and the solid fade back as the heat cools.
+// smaller as the ink gets darker. Lighter colors are drawn solid. The ASCII
+// variant stamps one glyph per cell instead: a sparse mark for dark ink, a
+// dense mark for light ink. Hovering paints a heat field that cools and
+// spreads. The lift recolors the ink and pushes it toward the solid curve, or
+// toward a denser glyph. Both fade back as the heat cools.
 
 // ---- Tweakable settings ----
-uniform vec3  u_color0;  // color #022650
-uniform vec3  u_color1;  // color #0b2f5d
-uniform vec3  u_color2;  // color #4974ac
+uniform vec3  u_color0;  // color #001023
+uniform vec3  u_color1;  // color #082f60
+uniform vec3  u_color2;  // color #265ea6
 uniform vec3  u_color3;  // color #c3d2e6
-uniform float u_apexX;   // 0.40, 0.65, 0.60
+uniform float u_apexX;   // 0.40, 0.65, 0.50
 uniform float u_apexY;   // 0.40, 0.62, 0.50
 uniform float u_zoom;    // 0.0, 0.5, 0.10
 uniform float u_view;    // 0.1, 1.5, 0.35
@@ -23,27 +24,42 @@ uniform float u_drift;   // 0.0, 3.0, 0.0
 uniform float u_spin;    // -0.2, 0.2, 0.0
 uniform float u_bands;   // 0.05, 1.0, 0.20
 uniform float u_flow;    // 0.0, 1.0, 0.05
-uniform float u_line;    // 0.31, 4.0, 0.60
+uniform float u_line;    // 0.31, 4.0, 0.31
 uniform float u_opacity; // 0.0, 1.0, 1.0
 
+#ifndef ASCII
 // ---- Halftone ----
 uniform float u_dither;  // 0.0, 1.0, 1.0
 uniform float u_cell;    // 4.0, 48.0, 6.4
-uniform float u_dot;     // 0.2, 2.0, 1.73
-uniform float u_angle;   // 0.0, 6.28, 2.25
+uniform float u_dot;     // 0.2, 2.0, 0.55
+uniform float u_angle;   // 0.0, 6.28, 2.0
 uniform float u_dotCut;  // 0.05, 1.0, 1.0
-uniform float u_dotMin;  // 0.0, 1.0, 0.12
+uniform float u_dotMin;  // 0.0, 1.0, 0.35
 uniform float u_dotTint; // 0.0, 1.0, 0.0
+#else
+// ---- ASCII ----
+// One upright-or-rotated cell per glyph. Tone picks the character: dark ink
+// stays sparse, light ink and heat step toward the densest mark.
+uniform float u_dither;    // 0.0, 1.0, 0.7
+uniform float u_cell;      // 8.0, 40.0, 16.0
+uniform float u_angle;     // 0.0, 6.28, 0.0
+uniform float u_toneCut;   // 0.05, 1.0, 1.0
+uniform float u_glyphMin;  // 0.0, 1.0, 0.12
+uniform float u_glyphTint; // 0.0, 1.0, 0.0
+uniform float u_cellAspect;
+uniform float u_glyphCount;
+uniform sampler2D u_glyphMap;
+#endif
 
 // ---- Heat ----
 // Screen-space field. Radius, dissipate, and spread drive it each frame.
-// Lift recolors the ink and grows the dots. At the brightness of the lightest
-// stop the curve is drawn solid, the same as that color, then returns to
-// dots as the spot cools.
+// Lift recolors the ink. Halftone grows the dots until the lightest stop, then
+// draws the curve solid. ASCII steps to a denser glyph. Both return as the
+// spot cools.
 uniform vec3  u_heatColor;     // color #c3d2e6
 uniform float u_heatRadius;    // 0.02, 0.80, 0.10
-uniform float u_heatDissipate; // 0.0, 3.0, 0.20
-uniform float u_heatSpread;    // 0.0, 8.0, 8.0
+uniform float u_heatDissipate; // 0.0, 3.0, 0.10
+uniform float u_heatSpread;    // 0.0, 8.0, 0.80
 uniform float u_heatLift;      // 0.0, 1.0, 1.0
 
 // ---- Quality ----
@@ -231,21 +247,71 @@ void main() {
     float pixUV = 2.0 / u_resolution.y; // one screen pixel in uv units
 
 #ifdef CELL_WRITE
-    // One dragon sample per halftone cell. The screen pass only draws the dot.
+    // One dragon sample per cell. The screen pass only draws the dot or glyph.
     vec2 cellId = gl_FragCoord.xy - 0.5 + u_cellOrigin;
+#ifdef ASCII
+    vec2 cellSize = vec2(u_cell * u_cellAspect, u_cell);
+    vec2 cellCenter = rot(-u_angle) * ((cellId + 0.5) * cellSize);
+#else
     vec2 cellCenter = rot(-u_angle) * ((cellId + 0.5) * u_cell);
+#endif
     vec3 cellCol = vec3(0.0);
     bool cellHit = sampleDragon(pxToUV(cellCenter), 0.5 * u_cell * pixUV, cellCol);
     fragColor = cellHit ? vec4(cellCol, 1.0) : vec4(0.0);
 #else
     vec2 px = v_uv * u_resolution;
-    vec2 fragPx = gl_FragCoord.xy;
 
     // Palette brightness reference: the brightest of the four colors
     float l0 = luma(u_color0), l1 = luma(u_color1), l2 = luma(u_color2), l3 = luma(u_color3);
     float lmax = max(max(l0, l1), max(l2, l3));
     float lmin = min(min(l0, l1), min(l2, l3));
     vec3 brightest = lmax == l0 ? u_color0 : lmax == l1 ? u_color1 : lmax == l2 ? u_color2 : u_color3;
+
+#ifdef ASCII
+    float cutL = max(lmax * u_toneCut, 1e-4);
+    vec2 cellSize = vec2(u_cell * u_cellAspect, u_cell);
+    // Divide after rotating so a wide glyph cell matches the CPU grid.
+    vec2 grid = (rot(u_angle) * px) / cellSize;
+    vec2 id   = floor(grid);
+    vec2 f    = fract(grid);
+    vec2 centerPx = rot(-u_angle) * ((id + 0.5) * cellSize);
+
+    vec3 colC = vec3(0.0);
+    bool hitC;
+#ifdef CELL_READ
+    vec4 cached = texture(u_cellMap, (id - u_cellOrigin + 0.5) / u_cellTexSize);
+    colC = cached.rgb;
+    hitC = cached.a > 0.5;
+#else
+    hitC = sampleDragon(pxToUV(centerPx), 0.5 * u_cell * pixUV, colC);
+#endif
+
+    vec4 ink = vec4(0.0);
+    if (hitC) {
+        float heat = clamp(heatAt(centerPx), 0.0, 1.0);
+        vec3 shown = heatColor(colC, heat);
+        float span = max(cutL - lmin, 1e-4);
+        float cold = clamp((luma(colC) - lmin) / span, 0.0, 1.0);
+        float bright = mix(cold, 1.0, heat * clamp(u_heatLift, 0.0, 1.0));
+        float tone = mix(u_glyphMin, 1.0, bright);
+
+        float count = max(u_glyphCount, 1.0);
+        float steps = count - 1.0;
+        float idx = 0.0;
+        if (steps > 0.0) {
+            float scaled = clamp(tone, 0.0, 1.0) * steps;
+            float jitter = fract(sin(dot(id + vec2(0.5), vec2(127.1, 311.7))) * 43758.5453);
+            float pick = mix(0.5, jitter, clamp(u_dither, 0.0, 1.0));
+            idx = clamp(floor(scaled + pick), 0.0, steps);
+        }
+        vec2 glyphUv = vec2((idx + f.x) / count, f.y);
+        float mask = texture(u_glyphMap, glyphUv).a;
+        vec3 dc = mix(shown, brightest, u_glyphTint * (1.0 - tone));
+        ink = vec4(dc * mask, mask);
+    }
+    fragColor = ink * u_opacity;
+#else
+    vec2 fragPx = gl_FragCoord.xy;
     float cutL = max(lmax * u_dotCut, 1e-4);
 
     // ---- Solid layer: the dragon at full resolution (bright parts) ----
@@ -309,5 +375,6 @@ void main() {
     // Premultiplied alpha: solid over dots, everything else fully transparent.
     vec4 ink = solid + dots * (1.0 - solid.a);
     fragColor = ink * u_opacity;
+#endif
 #endif
 }
