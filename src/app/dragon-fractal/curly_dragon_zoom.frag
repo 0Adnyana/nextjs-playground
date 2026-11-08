@@ -8,10 +8,10 @@
 // curve solid. Both the size and the solid fade back as the heat cools.
 
 // ---- Tweakable settings ----
-uniform vec3  u_color0;  // color #0b1c30
-uniform vec3  u_color1;  // color #102846
-uniform vec3  u_color2;  // color #183760
-uniform vec3  u_color3;  // color #4790f0
+uniform vec3  u_color0;  // color #022650
+uniform vec3  u_color1;  // color #0b2f5d
+uniform vec3  u_color2;  // color #4974ac
+uniform vec3  u_color3;  // color #c3d2e6
 uniform float u_apexX;   // 0.40, 0.65, 0.60
 uniform float u_apexY;   // 0.40, 0.62, 0.50
 uniform float u_zoom;    // 0.0, 0.5, 0.10
@@ -40,7 +40,7 @@ uniform float u_dotTint; // 0.0, 1.0, 0.0
 // Lift recolors the ink and grows the dots. At the brightness of the lightest
 // stop the curve is drawn solid, the same as that color, then returns to
 // dots as the spot cools.
-uniform vec3  u_heatColor;     // color #adc9ed
+uniform vec3  u_heatColor;     // color #c3d2e6
 uniform float u_heatRadius;    // 0.02, 0.80, 0.10
 uniform float u_heatDissipate; // 0.0, 3.0, 0.20
 uniform float u_heatSpread;    // 0.0, 8.0, 8.0

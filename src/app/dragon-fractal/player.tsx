@@ -642,7 +642,7 @@ export function DragonFractal() {
     const perf = {
       frameCap: true,
       singleSample: true,
-      cellSamples: false,
+      cellSamples: true,
       sharedRadius: true,
       coarseHeat: true,
       halfRes: false,
