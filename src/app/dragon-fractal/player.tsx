@@ -50,34 +50,44 @@ uniform vec2 u_mouse;
 uniform float u_dt;
 uniform float u_deposit;
 uniform float u_heatRadius;
+uniform float u_heatFalloff;
 uniform float u_heatDissipate;
 uniform float u_heatSpread;
 in vec2 v_uv;
 out vec4 fragColor;
 
 void main() {
-  // Spread is a blur radius in pixels at 60fps, scaled so it stays put
-  // when the frame time changes. Five taps cover the gaussian.
-  float blur = max(u_heatSpread, 0.0) * u_dt * 60.0;
+  // Percent of the shorter side. Spread is that distance per second, so the
+  // slider stays in the same units as the circle instead of a few pixels.
+  float minSide = min(u_resolution.x, u_resolution.y);
   vec2 texel = 1.0 / u_resolution;
-  float acc = 0.0;
-  float wsum = 0.0;
-  for (int j = -2; j <= 2; j++) {
-    for (int i = -2; i <= 2; i++) {
-      float d2 = float(i * i + j * j);
-      float w = exp(-d2 * 0.5);
-      vec2 uv = v_uv + vec2(float(i), float(j)) * blur * texel;
-      acc += texture(u_prev, uv).r * w;
-      wsum += w;
+  float sigma = max(u_heatSpread, 0.0) * 0.01 * minSide * max(u_dt, 0.0);
+  float heat = texture(u_prev, v_uv).r;
+  if (sigma >= 0.5) {
+    float spacing = sigma * 2.0 / 3.0;
+    float acc = 0.0;
+    float wsum = 0.0;
+    for (int j = -3; j <= 3; j++) {
+      for (int i = -3; i <= 3; i++) {
+        vec2 offset = vec2(float(i), float(j)) * spacing;
+        float w = exp(-dot(offset, offset) / (2.0 * sigma * sigma));
+        acc += texture(u_prev, v_uv + offset * texel).r * w;
+        wsum += w;
+      }
     }
+    heat = acc / wsum;
   }
-  float heat = (acc / wsum) * exp(-u_dt * max(u_heatDissipate, 0.0));
+  heat *= exp(-u_dt * max(u_heatDissipate, 0.0));
   if (u_deposit > 0.5) {
     vec2 px = v_uv * u_resolution;
-    float radius = max(u_heatRadius * min(u_resolution.x, u_resolution.y), 1.0);
-    float dist = length(px - u_mouse) / radius;
-    float brush = exp(-dist * dist * 2.2);
-    brush *= 1.0 - smoothstep(0.72, 1.0, dist);
+    float radius = max(u_heatRadius, 0.0) * 0.01 * minSide;
+    float falloff = max(u_heatFalloff, 0.0) * 0.01 * minSide;
+    float dist = length(px - u_mouse);
+    // Full inside the circle. The fade past it is its own distance, so a
+    // larger circle does not grow a wider rim.
+    float brush = falloff > 0.0
+      ? 1.0 - smoothstep(radius, radius + falloff, dist)
+      : 1.0 - step(radius, dist);
     heat = max(heat, brush);
   }
   fragColor = vec4(clamp(heat, 0.0, 1.0), 0.0, 0.0, 1.0);
@@ -783,6 +793,7 @@ export function DragonFractal({ glyphs }: { glyphs?: string } = {}) {
     const heatDt = gl.getUniformLocation(heatProgram, "u_dt");
     const heatDeposit = gl.getUniformLocation(heatProgram, "u_deposit");
     const heatRadius = gl.getUniformLocation(heatProgram, "u_heatRadius");
+    const heatFalloff = gl.getUniformLocation(heatProgram, "u_heatFalloff");
     const heatDissipate = gl.getUniformLocation(heatProgram, "u_heatDissipate");
     const heatSpread = gl.getUniformLocation(heatProgram, "u_heatSpread");
     gl.useProgram(program);
@@ -969,7 +980,7 @@ export function DragonFractal({ glyphs }: { glyphs?: string } = {}) {
         return;
       }
 
-      const dissipate = numberParam(params, "u_heatDissipate", 0.1);
+      const dissipate = numberParam(params, "u_heatDissipate", 0.7);
       if (heatReset || pointer.inside) heatEnvelope = pointer.inside ? 1 : 0;
       else heatEnvelope *= Math.exp(-dt * Math.max(dissipate, 0));
       const heatLive = !perf.coarseHeat || heatEnvelope > 1 / 255;
@@ -994,14 +1005,14 @@ export function DragonFractal({ glyphs }: { glyphs?: string } = {}) {
         if (heatDt) gl.uniform1f(heatDt, dt);
         if (heatDeposit) gl.uniform1f(heatDeposit, pointer.inside ? 1 : 0);
         if (heatRadius) {
-          gl.uniform1f(heatRadius, numberParam(params, "u_heatRadius", 0.1));
+          gl.uniform1f(heatRadius, numberParam(params, "u_heatRadius", 0.5));
+        }
+        if (heatFalloff) {
+          gl.uniform1f(heatFalloff, numberParam(params, "u_heatFalloff", 5));
         }
         if (heatDissipate) gl.uniform1f(heatDissipate, dissipate);
         if (heatSpread) {
-          gl.uniform1f(
-            heatSpread,
-            numberParam(params, "u_heatSpread", 0.8) * heatScale,
-          );
+          gl.uniform1f(heatSpread, numberParam(params, "u_heatSpread", 2));
         }
         gl.drawArrays(gl.TRIANGLES, 0, 3);
         heatIndex = dst;

@@ -9,33 +9,33 @@
 // toward a denser glyph. Both fade back as the heat cools.
 
 // ---- Tweakable settings ----
-uniform vec3  u_color0;  // color #001023
-uniform vec3  u_color1;  // color #082f60
-uniform vec3  u_color2;  // color #265ea6
-uniform vec3  u_color3;  // color #c3d2e6
-uniform float u_apexX;   // 0.40, 0.65, 0.50
-uniform float u_apexY;   // 0.40, 0.62, 0.50
-uniform float u_zoom;    // 0.0, 0.5, 0.10
-uniform float u_view;    // 0.1, 1.5, 0.35
-uniform float u_focusX;  // 0.0, 1.0, 0.63
-uniform float u_focusY;  // 0.0, 1.0, 0.41
-uniform float u_morph;   // -0.1, 0.08, 0.0
-uniform float u_drift;   // 0.0, 3.0, 0.0
-uniform float u_spin;    // -0.2, 0.2, 0.0
-uniform float u_bands;   // 0.05, 1.0, 0.20
-uniform float u_flow;    // 0.0, 1.0, 0.05
-uniform float u_line;    // 0.31, 4.0, 0.31
-uniform float u_opacity; // 0.0, 1.0, 1.0
+uniform vec3  u_color0;         // color #001023
+uniform vec3  u_color1;         // color #082f60
+uniform vec3  u_color2;         // color #265ea6
+uniform vec3  u_color3;         // color #c3d2e6
+uniform float u_apexX;          // 0.4, 0.65, 0.5
+uniform float u_apexY;          // 0.4, 0.62, 0.5
+uniform float u_zoom;           // 0.0, 0.5, 0.08
+uniform float u_view;           // 0.1, 1.5, 0.35
+uniform float u_focusX;         // 0.0, 1.0, 0.63
+uniform float u_focusY;         // 0.0, 1.0, 0.41
+uniform float u_morph;          // -0.1, 0.08, 0.0
+uniform float u_drift;          // 0.0, 3.0, 0.0
+uniform float u_spin;           // -0.2, 0.2, 0.0
+uniform float u_bands;          // 0.05, 1.0, 0.2
+uniform float u_flow;           // 0.0, 1.0, 0.02
+uniform float u_line;           // 0.31, 4.0, 0.31
+uniform float u_opacity;        // 0.0, 1.0, 1.0
 
 #ifndef ASCII
 // ---- Halftone ----
-uniform float u_dither;  // 0.0, 1.0, 1.0
-uniform float u_cell;    // 4.0, 48.0, 6.4
-uniform float u_dot;     // 0.2, 2.0, 0.55
-uniform float u_angle;   // 0.0, 6.28, 2.0
-uniform float u_dotCut;  // 0.05, 1.0, 1.0
-uniform float u_dotMin;  // 0.0, 1.0, 0.35
-uniform float u_dotTint; // 0.0, 1.0, 0.0
+uniform float u_dither;         // 0.0, 1.0, 1.0
+uniform float u_cell;           // 4.0, 48.0, 6.4
+uniform float u_dot;            // 0.2, 2.0, 0.83
+uniform float u_angle;          // 0.0, 6.28, 2.0
+uniform float u_dotCut;         // 0.05, 1.0, 0.566
+uniform float u_dotMin;         // 0.0, 1.0, 0.2
+uniform float u_dotTint;        // 0.0, 1.0, 0.0
 #else
 // ---- ASCII ----
 // One upright-or-rotated cell per glyph. Tone picks the character: dark ink
@@ -52,15 +52,19 @@ uniform sampler2D u_glyphMap;
 #endif
 
 // ---- Heat ----
-// Screen-space field. Radius, dissipate, and spread drive it each frame.
-// Lift recolors the ink. Halftone grows the dots until the lightest stop, then
-// draws the curve solid. ASCII steps to a denser glyph. Both return as the
-// spot cools.
-uniform vec3  u_heatColor;     // color #c3d2e6
-uniform float u_heatRadius;    // 0.02, 0.80, 0.10
-uniform float u_heatDissipate; // 0.0, 3.0, 0.10
-uniform float u_heatSpread;    // 0.0, 8.0, 0.80
-uniform float u_heatLift;      // 0.0, 1.0, 1.0
+// Screen-space field. Radius, falloff, and spread are percentages of the
+// shorter side. Radius is the solid circle. Falloff is how far the light
+// fades past that circle, so it stays put when the radius changes. Spread
+// is that distance per second. Dissipate is how fast the heat cools, per
+// second. Lift recolors the ink. Halftone grows the dots until the lightest
+// stop, then draws the curve solid. ASCII steps to a denser glyph. Both
+// return as the spot cools.
+uniform vec3  u_heatColor;      // color #c3d2e6
+uniform float u_heatRadius;     // 0.0, 150.0, 0.5
+uniform float u_heatFalloff;    // 0.0, 150.0, 5.0
+uniform float u_heatDissipate;  // 0.0, 10.0, 0.7
+uniform float u_heatSpread;     // 0.0, 100.0, 2.0
+uniform float u_heatLift;       // 0.0, 1.0, 0.55
 
 // ---- Quality ----
 const int MAX_DEPTH = 24;   // detail cap
@@ -122,14 +126,14 @@ vec3 linearToSrgb(vec3 c) {
     return mix(lo, hi, step(vec3(0.0031308), c));
 }
 
-// Color 1 → 2 → 3 → 4 → 3 → 2 → 1, then repeat. The parameter moves at a
-// constant rate, and each leg between stops takes the same share of the cycle.
+// Color 1 → 2 → 3 → 4 → 3 → 2 → 1, then repeat. Each leg takes the same share
+// of the cycle and eases in and out, so the blend settles on a stop.
 vec3 gradientMap(float x) {
     float p = fract(x);
     float tri = p < 0.5 ? p * 2.0 : 2.0 - p * 2.0;
     float g = tri * 3.0;
     int i = int(min(floor(g), 2.0));
-    float f = g - float(i);
+    float f = smoothstep(0.0, 1.0, g - float(i));
     vec3 a = u_color0;
     vec3 b = u_color1;
     if (i == 1)      { a = u_color1; b = u_color2; }
@@ -332,9 +336,10 @@ void main() {
     }
     float cover = hits / float(aa * aa);
     vec3 colP = hits > 0.0 ? colSum / hits : vec3(0.0);
-    // Same test as the lightest stop: once the lifted ink is that bright,
-    // draw the full-resolution curve instead of the halftone.
-    float solidP = smoothstep(0.8, 1.0, luma(colP) / cutL);
+    // Hold the halftone until the last of the lightest stop, then hand off
+    // over a short edge. The dot layer uses this same window.
+    const float solidAt = 0.96;
+    float solidP = smoothstep(solidAt, 1.0, luma(colP) / cutL);
     float solidW = mix(1.0, solidP, u_dither);
     vec4 solid = vec4(colP * cover, cover) * solidW;
 
@@ -367,7 +372,7 @@ void main() {
         float radius = tone * 0.5 * u_dot;
         float aa = 1.5 / u_cell;
         float mask = 1.0 - smoothstep(radius - aa, radius + aa, length(f));
-        float a = mask * (1.0 - smoothstep(0.8, 1.0, luma(shown) / cutL)) * u_dither;
+        float a = mask * (1.0 - smoothstep(solidAt, 1.0, luma(shown) / cutL)) * u_dither;
         vec3 dc = mix(shown, brightest, u_dotTint * (1.0 - tone));
         dots = vec4(dc * a, a);
     }
