@@ -828,7 +828,17 @@ export function DragonFractal({ glyphs }: { glyphs?: string } = {}) {
     observer.observe(canvas);
 
     const stats = new Stats();
+    // The back link owns the top-left corner. Drop the meter below it.
+    stats.dom.style.left = "max(1rem, env(safe-area-inset-left))";
+    stats.dom.style.top =
+      "calc(max(1rem, env(safe-area-inset-top)) + 3.25rem)";
     document.body.appendChild(stats.dom);
+    const statsToggle = pane.addButton({ title: "Hide stats", index: 0 });
+    statsToggle.on("click", () => {
+      const hidden = stats.dom.style.display === "none";
+      stats.dom.style.display = hidden ? "" : "none";
+      statsToggle.title = hidden ? "Hide stats" : "Show stats";
+    });
 
     const started = performance.now();
     let frame = 0;

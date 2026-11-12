@@ -1,4 +1,6 @@
 import type { Metadata } from "next";
+
+import { BackHome } from "@/components/back-home";
 import { DragonFractal } from "../dragon-fractal/player";
 
 export const metadata: Metadata = {
@@ -9,5 +11,10 @@ export const metadata: Metadata = {
 const GLYPHS = " .:-=+*#%@";
 
 export default function Page() {
-  return <DragonFractal glyphs={GLYPHS} />;
+  return (
+    <>
+      <DragonFractal glyphs={GLYPHS} />
+      <BackHome />
+    </>
+  );
 }
